@@ -3,23 +3,24 @@
 /***********************************************************************************
 
   Golf Cart Proximity Detector - Enable golf cart ignition when your phone is within
-  range.  Phone must be running a BLE beacon program which sends a particular UUID
-  which is recorded in the knownDevices array.
+  range.  You must have a beacon tag, or your phone must be running a BLE beacon 
+  program which sends a UUID or address in the knownDevices array.
   
   Based on code by Pete Dziekan, a.k.a PeteTheGeek
 
 ************************************************************************************/
+#include    <BLEDevice.h>
 
 /**********************************************************************************
   Configuration parameters
  **********************************************************************************/
 #define SCAN_DURATION           3       // BLEscan duration in sec.
-#define RSSI_PROXIMITY          -92     // minimum RSSI needed to declare "presence"
+#define RSSI_PROXIMITY          -80     // minimum RSSI needed to declare "presence" (more positive=stronger)
 #define RELAY_PIN               15      // Port for LED/relay
 #define EXT_LED_PIN             23      // External LED or other device
 #define MISSES_BEFORE_ABSENT    20      // Has to miss this many in a row to turn off
 #define uS_TO_S_FACTOR          1000000 // Conversion factor for micro seconds to seconds
-#define NORMAL_SLEEP            15      // sleep duration (secs)
+#define NORMAL_SLEEP            5       // sleep duration (secs)
 #define OUT_OF_RANGE_DELAY_MSEC 5000    // wait this long before checking again after signal disappears
 
 
@@ -29,14 +30,19 @@
   My known devices
  **********************************************************************************/
 struct typeKnownDevice {
-  String uuid;                // BLE UUID
-  int    rssi;                // RSSI
-  String name;                // Friendly device name
+  String address;  // MAC address 
+  String uuid;     // BLE UUID
+  int    rssi;     // RSSI
+  String name;     // Friendly device name
 };
 
+//Valid devices are in this array.  Either the manufacturer values in the UUID
+//or the MAC address has to match for the golf cart to be enabled.
 typeKnownDevice knownDevices[] = {
-  {"78acf66b44ce43aab23aa1a8247ed9dd", 0, "David's Phone"},
-  {"78acf66b44ce43aab23aa1a8247ed9bb", 0, "Judy's Phone"}
+  {"00:00:00:00:00:00", "78acf66b44ce43aab23aa1a8247ed9dd", 0, "David's Phone"},
+  {"00:00:00:00:00:00", "78acf66b44ce43aab23aa1a8247ed9bb", 0, "Judy's Phone"},
+  {"ff:ff:c1:43:7f:57", "0000ffe000001000800000805f9b34fb", 0, "iTag Keyfob 1"},
+  {"ff:ff:c1:43:d3:94", "0000ffe000001000800000805f9b34fb", 0, "iTag Keyfob 2"} 
 };
 
 int numKnownDevices = sizeof(knownDevices) / sizeof(knownDevices[0]);
@@ -47,10 +53,8 @@ uint64_t sleep_secs=((uint64_t)NORMAL_SLEEP * (uint64_t)uS_TO_S_FACTOR);
 
 
 /**********************************************************************************
-  setup BLE pointers
+  set up BLE pointers
  **********************************************************************************/
-#include    <BLEDevice.h>
-//static      BLEAddress *pServerAddress;
 BLEScan*    pBLEScan;
 BLEClient*  pClient;
 
@@ -62,54 +66,46 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
     void onResult(BLEAdvertisedDevice advertisedDevice) {
       Serial.printf("    - Checking found device..."); 
       
+      String candidateAddress=String(advertisedDevice.getAddress().toString().c_str());
+        
       int rssi=advertisedDevice.getRSSI();
+
+//      BLEAddress address=advertisedDevice.getAddress();
+//      Serial.printf("Address is %s",address.toString().c_str());
 
       char* mfgData;
       char* hexData;
+      mfgData={0}; //init to null string
+      
       if (advertisedDevice.getManufacturerData().length()>0) {
         hexData=BLEUtils::buildHexData(nullptr, 
             (uint8_t*)advertisedDevice.getManufacturerData().data(), 
             (uint8_t)advertisedDevice.getManufacturerData().length());
       }
 
-
       if ((uint8_t)advertisedDevice.getManufacturerData().length()>24) {
         mfgData=hexData+8;
         mfgData[32]=0;
-        
-        Serial.printf("\n    - Device found: RSSI=%d, dataLength=%d, raw=%d, MfrUUID=%s\n", 
-            rssi, 
-            (uint8_t)advertisedDevice.getManufacturerData().length(),
-            (uint8_t*)advertisedDevice.getManufacturerData().data(),
-            mfgData
-            );
-      }
-      else 
-        Serial.printf(" - Device not of interest (rssi=%d).\n",rssi); 
+        }
+      else Serial.printf(" - Device address is %s.\n",candidateAddress.c_str());
 
       for (int i=0; i<numKnownDevices; i++) {
-        if (!mfgData)
-          continue;
-        else if (strncmp(mfgData, knownDevices[i].uuid.c_str(), knownDevices[i].uuid.length()) == 0) {
-          Serial.printf("Found %s, rssi=%d, mfgData is %s\n",knownDevices[i].uuid.c_str(),rssi,mfgData);
-          knownDevices[i].rssi = rssi;                              // save RSSI
-          //Serial.printf("%s\n", advertisedDevice.getName().c_str());
-          //advertisedDevice.getScan()->stop(); // We can stop if any of our devices were found, we don't need to scan any further
+        if (mfgData) {
+          if (strncmp(mfgData, knownDevices[i].uuid.c_str(), knownDevices[i].uuid.length()) == 0) {
+            Serial.printf("Found %s, rssi=%d, mfgData is %s\n",knownDevices[i].uuid.c_str(),rssi,mfgData);
+            knownDevices[i].rssi = rssi; // save RSSI
+            }
+          }
+        else 
+          {
+          if (knownDevices[i].address==candidateAddress) {
+            Serial.printf("Found %s, rssi=%d, address is %s\n",knownDevices[i].uuid.c_str(),rssi,advertisedDevice.getAddress().toString().c_str());
+            knownDevices[i].rssi = rssi; // save RSSI          
+            }
+          }
         }
       }
-
-//      delete hexData;
-//      hexData=NULL;
-    }
-    
-  
-//  size_t freeRAM(void)
-//  {
-//  char stack_dummy = 0;
-//  return(&stack_dummy - sbrkx(0));
-//  }
-
-};
+  };
 
 
 /**********************************************************************************
@@ -172,7 +168,8 @@ void goToSleep()
  **********************************************************************************/
 void scan() {
   int i;
-  for (i=0; i<numKnownDevices; i++) knownDevices[i].rssi = RSSI_PROXIMITY-1;  // reset last RSSI value
+  for (i=0; i<numKnownDevices; i++) 
+    knownDevices[i].rssi = RSSI_PROXIMITY-1;  // reset last RSSI value
   
   Serial.printf("\nBLE - Starting scan...\n");
   BLEScanResults scanResults = pBLEScan->start(SCAN_DURATION);                // start scan to find our BLE devices
@@ -188,7 +185,7 @@ void scan() {
     bool found=false;
     
     for (i=0; i<numKnownDevices; i++) {
-      if (knownDevices[i].rssi > RSSI_PROXIMITY) { // Larger (more positive) number is stronger signal
+      if (knownDevices[i].rssi >= RSSI_PROXIMITY) { // Larger (more positive) number is stronger signal
         Serial.printf("Device in range: RSSI %d, %s\n",
                       knownDevices[i].rssi,
                       knownDevices[i].name.c_str());
